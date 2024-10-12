@@ -243,6 +243,12 @@ class PlanningCenter {
       host: _baseUri.host,
       path: _baseUri.path,
     );
+    _uploadsUri = Uri.parse(uploadsEndpoint);
+    _uploadsUri = Uri(
+      scheme: _uploadsUri.scheme,
+      host: _uploadsUri.host,
+      path: _uploadsUri.path,
+    );
     _client = http.Client();
     var now = DateTime.now();
     var expiresAt = DateTime.fromMillisecondsSinceEpoch(
@@ -424,15 +430,17 @@ class PlanningCenter {
   }
 
   /// Handle Uploads
-  Future<PlanningCenterApiResponse> upload(String filename) async {
+  Future<PlanningCenterApiResponse> upload(String path,
+      {String? filename}) async {
     // if we are using app secret authentication, it will be embedded in the _uploadsUri
     // if not, we try to populate the _authHeaders
     var authFailure = await _checkCredentials();
     if (authFailure != null) return authFailure;
 
     var request = http.MultipartRequest('POST', _uploadsUri);
-    var fileBytes = File(filename).readAsBytesSync();
-    var fileToPost = http.MultipartFile.fromBytes('file', fileBytes);
+    var fileBytes = File(path).readAsBytesSync();
+    var fileToPost = http.MultipartFile.fromBytes('file', fileBytes,
+        filename: filename ?? path);
     request.files.add(fileToPost);
     request.headers.addAll(_authHeaders);
     var res = await http.Response.fromStream(await request.send());
