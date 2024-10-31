@@ -14,6 +14,19 @@ const int apiInterval = 201;
 /// requests sent by the browser.
 typedef PlanningCenterAuthRedirector = Future<String> Function(String url);
 
+/// [UploadProgressReporter] describes a function that receives progress updates
+/// on file upload to report them to the user and returns [true] to continue the
+/// upload or [false] to cancel
+typedef UploadProgressReporter = Future<bool> Function(
+    int byteCount,
+    int totalBytes,
+    double transferRate,
+    String rateUnit,
+    Duration? remaining,
+    String? filename);
+
+class UploadCancelException implements IOException {}
+
 /// [localHttpRedirector] is a function that builds an example Auth Redirector
 /// using the specified ip address and  port. It will open an http server listening
 /// at that address and port waiting for the user's browser to perform the redirect.
@@ -431,15 +444,54 @@ class PlanningCenter {
 
   /// Handle Uploads
   Future<PlanningCenterApiResponse> upload(String path,
-      {String? filename}) async {
+      {String? filename, UploadProgressReporter? reporter}) async {
     // if we are using app secret authentication, it will be embedded in the _uploadsUri
     // if not, we try to populate the _authHeaders
     var authFailure = await _checkCredentials();
     if (authFailure != null) return authFailure;
 
     var request = http.MultipartRequest('POST', _uploadsUri);
-    var fileBytes = File(path).readAsBytesSync();
-    var fileToPost = http.MultipartFile.fromBytes('file', fileBytes,
+    int byteCount = 0;
+    DateTime? chunkBegin;
+    int chunkBytes = 0;
+    var f = File(path);
+    var totalBytes = f.lengthSync();
+    var fileStream = f.openRead();
+    Stream<List<int>> reportingStream =
+        fileStream.transform(StreamTransformer.fromHandlers(
+      handleData: (data, sink) async {
+        bool proceed = true;
+        if (reporter != null) {
+          var rate = UploadRate(chunkBegin, chunkBytes);
+          proceed = await reporter(
+              byteCount,
+              totalBytes,
+              rate.transferRate,
+              rate.rateUnit,
+              rate.timeToComplete(totalBytes - byteCount),
+              filename);
+        }
+        if (proceed) {
+          sink.add(data);
+        } else {
+          sink.addError(UploadCancelException());
+        }
+
+        chunkBytes = data.length;
+        chunkBegin = DateTime.now();
+        byteCount += data.length;
+      },
+      handleDone: (sink) {
+        sink.close();
+        if (reporter != null) {
+          reporter(byteCount, totalBytes, 0.0, '', null, filename);
+        }
+      },
+      handleError: (error, stackTrace, sink) {
+        throw error;
+      },
+    ));
+    var fileToPost = http.MultipartFile('file', reportingStream, totalBytes,
         filename: filename ?? path);
     request.files.add(fileToPost);
     request.headers.addAll(_authHeaders);
@@ -462,6 +514,48 @@ class PlanningCenter {
       res.statusCode,
       res.body,
     );
+  }
+}
+
+class UploadRate {
+  double transferRate = 0;
+  String rateUnit = '';
+  double _bytesPerSecond = 0;
+
+  UploadRate(DateTime? begin, int bytes) {
+    transferRate = 0;
+    rateUnit = '';
+    if (begin == null) {
+      return;
+    }
+
+    Duration interval = DateTime.now().difference(begin);
+    double intervalSeconds =
+        interval.inMicroseconds.toDouble() / Duration.microsecondsPerSecond;
+    var converter = DigitalData(removeTrailingZeros: true);
+    converter.convert(DIGITAL_DATA.byte, bytes.toDouble());
+    for (var unit in [
+      converter.gigabyte,
+      converter.megabyte,
+      converter.kilobyte,
+      converter.byte
+    ]) {
+      var value = (unit.value ?? 0) / intervalSeconds;
+      if (value >= 1.0) {
+        transferRate = value;
+        rateUnit = '${unit.symbol ?? ''}/s';
+        break;
+      }
+    }
+    _bytesPerSecond = (converter.byte.value ?? 0) / intervalSeconds;
+  }
+
+  /// Return time to finish upload of remaining bytes at this rate to second
+  /// resolution
+  Duration? timeToComplete(int bytesRemaining) {
+    if (_bytesPerSecond <= 0) return null;
+    double seconds = bytesRemaining / _bytesPerSecond;
+    return Duration(seconds: seconds.truncate());
   }
 }
 
